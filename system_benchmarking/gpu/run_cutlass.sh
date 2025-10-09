@@ -1,221 +1,108 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ------------------------------------------------------------
-# CUTLASS benchmark runner for AI Roofline Modelling Framework
-# - Detects NVIDIA GPU + cutlass_profiler
-# - Optionally installs CUTLASS (clone + build) if not found
-# - Runs a GEMM benchmark and writes CSV results
-#
-# Usage:
-#   ./run_cutlass_benchmark.sh [--install-dir DIR] [--cutlass-root DIR] [--m 4096 --n 4096 --k 4096]
-#                              [--dtype f16] [--accum f32] [--iterations 50] [--out results.csv]
-#
-# Notes:
-# - Requires CUDA toolkit (nvcc), CMake, Git, and a C++ build system (Ninja or Make) to build CUTLASS.
-# ------------------------------------------------------------
+# --- Config (overridable via env or CLI) ---
+PROFILER_BIN="${PROFILER_BIN:-./cutlass/build/tools/profiler/cutlass_profiler}"
+M="${1:-8192}"
+N="${2:-8192}"
+K="${3:-8192}"
+OUTDIR="${OUTDIR:-./logs}"
+TF32_KERNEL_FILTER="${TF32_KERNEL_FILTER:-*tf32gemm*}"  # common CUTLASS naming for TF32 TC GEMM
 
-# Defaults
-INSTALL_DIR_DEFAULT="$HOME/cutlass"
-CUTLASS_ROOT_DEFAULT=""
-M=4096
-N=4096
-K=4096
-DTYPE="f16"      # typical tensor-core path
-ACCUM="f32"
-ITER=50
-OUTFILE="../logs/cutlass_results_$(date +%Y%m%d_%H%M%S).csv"
+mkdir -p "$OUTDIR"
 
-# Parse args
-INSTALL_DIR="$INSTALL_DIR_DEFAULT"
-CUTLASS_ROOT="$CUTLASS_ROOT_DEFAULT"
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --install-dir) INSTALL_DIR="$2"; shift 2;;
-    --cutlass-root) CUTLASS_ROOT="$2"; shift 2;;
-    --m) M="$2"; shift 2;;
-    --n) N="$2"; shift 2;;
-    --k) K="$2"; shift 2;;
-    --dtype) DTYPE="$2"; shift 2;;
-    --accum) ACCUM="$2"; shift 2;;
-    --iterations) ITER="$2"; shift 2;;
-    --out) OUTFILE="$2"; shift 2;;
-    -h|--help)
-      echo "Usage: $0 [--install-dir DIR] [--cutlass-root DIR] [--m M --n N --k K] [--dtype f16|f32] [--accum f32] [--iterations N] [--out file.csv]"
-      exit 0
-      ;;
-    *)
-      echo "Unknown option: $1" >&2
-      exit 1
-      ;;
-  esac
-done
-
-# Utilities
-have() { command -v "$1" >/dev/null 2>&1; }
-
-fail() { echo "ERROR: $*" >&2; exit 1; }
-
-log() { echo "[cutlass-bench] $*"; }
-
-# 1) Verify NVIDIA GPU presence
-if ! have nvidia-smi; then
-  fail "No NVIDIA GPU detected (nvidia-smi not found). This benchmark only supports NVIDIA GPUs."
+if [[ ! -x "$PROFILER_BIN" ]]; then
+  echo "ERROR: Can't execute profiler at: $PROFILER_BIN"
+  echo "Tip: set PROFILER_BIN=/path/to/cutlass_profiler"
+  exit 1
 fi
 
-# 2) Find cutlass_profiler in PATH or common locations
-find_profiler() {
-  if have cutlass_profiler; then
-    command -v cutlass_profiler
-    return 0
-  fi
+echo "== CUTLASS Peak FLOPS (FP32 & TF32) =="
+echo "Profiler: $PROFILER_BIN"
+echo "Problem:  M=$M N=$N K=$K"
+echo
 
-  # consider CUTLASS_ROOT if provided
-  local roots=()
-  if [[ -n "$CUTLASS_ROOT" ]]; then
-    roots+=("$CUTLASS_ROOT")
-  fi
-
-  # common defaults
-  roots+=("$INSTALL_DIR" "$HOME/cutlass" "$HOME/src/cutlass" "/opt/cutlass" "/usr/local/cutlass")
-
-  for r in "${roots[@]}"; do
-    [[ -d "$r" ]] || continue
-    # typical build paths by generator
-    for p in \
-      "$r/build/tools/profiler/cutlass_profiler" \
-      "$r/build/tools/profiler/Release/cutlass_profiler" \
-      "$r/build/bin/cutlass_profiler" \
-      "$r/tools/profiler/cutlass_profiler"
-    do
-      if [[ -x "$p" ]]; then
-        echo "$p"
-        return 0
-      fi
-    done
-  done
-
-  return 1
+# --- Helpers ---
+parse_max_gflops () {
+  # Robust-ish CSV parser for simple CUTLASS outputs (no embedded commas expected).
+  # Prints: "<max_gflops>,<kernel_name>,<op_class>,<math_mode>"
+  local csv="$1"
+  awk -F, '
+    NR==1{
+      for (i=1;i<=NF;i++){
+        f[$i]=i
+      }
+      gcol = (f["GFLOP/s"] ? f["GFLOP/s"] : (f["GFLOPs"] ? f["GFLOPs"] : 0))
+      kcol = (f["Kernel Name"] ? f["Kernel Name"] : (f["Kernel"] ? f["Kernel"] : 0))
+      ocol = (f["Operation"] ? f["Operation"] : 0)
+      mcol = (f["Math Instruction"] ? f["Math Instruction"] : (f["Math Mode"] ? f["Math Mode"] : 0))
+      next
+    }
+    NR>1 && gcol>0 {
+      # skip obvious non-results
+      if ($gcol=="" || $gcol ~ /nan|inf/) next
+      g = $gcol + 0
+      if (g>best) {best=g; kern=(kcol?kcol:0? $kcol:""); op=(ocol? $ocol:""); math=(mcol? $mcol:"") }
+    }
+    END{
+      if (best>0) {
+        printf("%.2f,%s,%s,%s\n", best, kern, op, math)
+      }
+    }
+  ' "$csv"
 }
 
-PROFILER_PATH="$(find_profiler || true)"
+# --- FP32 (SIMT) ---
+echo "[1/2] Running FP32 (SIMT) GEMM ..."
+"$PROFILER_BIN" \
+  --operation=Gemm \
+  --op_class=simt \
+  --A=f32:column --B=f32:column --C=f32:column --accum=f32 \
+  --m="$M" --n="$N" --k="$K" \
+  --enable-best-kernel-for-fixed-shape \
+  --sort-results-flops-per-sec \
+  --output="$OUTDIR/fp32_simt.csv"
 
-# 3) If not found, prompt to install & build CUTLASS
-maybe_install_cutlass() {
-  log "CUTLASS profiler not found."
-  read -r -p "Would you like to clone & build CUTLASS now at '$INSTALL_DIR'? [Y/n] " ans
-  ans=${ans:-Y}
-  if [[ "$ans" =~ ^[Yy]$ ]]; then
-    # prerequisite checks
-    have git || fail "git is required to clone CUTLASS."
-    have cmake || fail "cmake is required to build CUTLASS. (e.g., sudo apt-get install -y cmake)"
-    if ! have nvcc; then
-      fail "CUDA toolkit (nvcc) not found. Please install NVIDIA CUDA Toolkit compatible with your driver."
-    fi
-
-    # Prepare folder
-    mkdir -p "$(dirname "$INSTALL_DIR")"
-    if [[ -d "$INSTALL_DIR/.git" ]]; then
-      log "Existing CUTLASS repo detected at $INSTALL_DIR. Pulling latest..."
-      (cd "$INSTALL_DIR" && git pull --ff-only)
-    elif [[ -d "$INSTALL_DIR" && -n "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]]; then
-      fail "Install dir '$INSTALL_DIR' exists and is not empty. Use --install-dir to choose another location."
-    else
-      log "Cloning CUTLASS into $INSTALL_DIR ..."
-      git clone --depth 1 https://github.com/NVIDIA/cutlass.git "$INSTALL_DIR"
-    fi
-
-    # Configure & build (prefer Ninja if available)
-    local gen_args=()
-    if have ninja; then
-      gen_args+=("-G" "Ninja")
-    fi
-
-    log "Configuring CUTLASS build ..."
-    cmake -S "$INSTALL_DIR" -B "$INSTALL_DIR/build" \
-      "${gen_args[@]}" \
-      -DCMAKE_BUILD_TYPE=Release
-
-    log "Building cutlass_profiler (this can take a while) ..."
-    cmake --build "$INSTALL_DIR/build" --config Release --target cutlass_profiler -j
-
-    # Re-locate the profiler
-    PROFILER_PATH="$(find_profiler || true)"
-    [[ -x "${PROFILER_PATH:-}" ]] || fail "Build finished but cutlass_profiler not found. Please check the build logs."
-  else
-    fail "CUTLASS profiler is required to run this benchmark. Aborting."
-  fi
-}
-
-if [[ -z "${PROFILER_PATH:-}" ]]; then
-  maybe_install_cutlass
+FP32_SUMMARY="$(parse_max_gflops "$OUTDIR/fp32_simt.gemm.csv")"
+if [[ -z "$FP32_SUMMARY" ]]; then
+  echo "WARNING: No FP32 results parsed from $OUTDIR/fp32_simt.gemm.csv"
 fi
 
-log "Using cutlass_profiler: $PROFILER_PATH"
+# --- TF32 (Tensor Cores) ---
+echo "[2/2] Running TF32 (Tensor Core) GEMM ..."
+"$PROFILER_BIN" \
+  --operation=Gemm \
+  --op_class=tensorop \
+  --A=f32:column --B=f32:column --C=f32:column --accum=f32 \
+  --kernels="$TF32_KERNEL_FILTER" \
+  --m="$M" --n="$N" --k="$K" \
+  --enable-best-kernel-for-fixed-shape \
+  --sort-results-flops-per-sec \
+  --output="$OUTDIR/tf32_tensorop.csv"
+  
+# Locate output file with regex
 
-# 4) Run a representative GEMM benchmark
-# Try a modern set of flags first; if it fails, fall back to a minimal set.
-run_benchmark() {
-  local outfile="$1"
-  local ok=0
 
-  log "Running GEMM M=${M} N=${N} K=${K} dtype=${DTYPE} accum=${ACCUM}, iterations=${ITER}"
-  log "Writing CSV to: $outfile"
-
-  # Attempt: CSV to stdout (commonly supported)
-  if "$PROFILER_PATH" \
-      --operation=Gemm \
-      --m="$M" --n="$N" --k="$K" \
-      --dtype="$DTYPE" --accum="$ACCUM" \
-      --warmup-iterations=2 \
-      --iterations="$ITER" \
-      --csv >"$outfile" 2>cutlass_stderr.log; then
-    ok=1
-  else
-    log "Primary invocation failed, trying a simpler command line ..."
-    if "$PROFILER_PATH" \
-        --operation=Gemm \
-        --m="$M" --n="$N" --k="$K" \
-        --csv >"$outfile" 2>>cutlass_stderr.log; then
-      ok=1
-    fi
-  fi
-
-  if [[ "$ok" -ne 1 ]]; then
-    echo "----- cutlass_profiler stderr (last lines) -----" >&2
-    tail -n 50 cutlass_stderr.log >&2 || true
-    fail "cutlass_profiler failed to run. Try: '$PROFILER_PATH --help' to inspect supported flags."
-  fi
-}
-
-run_benchmark "$OUTFILE"
-
-# 5) Summarize key metric (GFLOPs/TFLOPs) if present
-PEAK_GFTS=""
-if grep -iE '(gflops|tflops)' "$OUTFILE" >/dev/null 2>&1; then
-  # Try to parse a GFLOPs/TFLOPs column from CSV header
-  # Find the column index and print the last data row's value
-  header_line=$(head -n1 "$OUTFILE")
-  IFS=',' read -r -a cols <<<"$header_line"
-
-  idx=-1
-  for i in "${!cols[@]}"; do
-    name="$(echo "${cols[$i]}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
-    [[ "$name" == "gflops" || "$name" == "tflops" ]] && idx="$i" && break
-  done
-
-  if [[ "$idx" -ge 0 ]]; then
-    last_line=$(tail -n1 "$OUTFILE")
-    IFS=',' read -r -a vals <<<"$last_line"
-    metric_val="${vals[$idx]}"
-    PEAK_GFTS="$metric_val"
-  fi
+TF32_SUMMARY="$(parse_max_gflops "$OUTDIR/tf32_tensorop.gemm.csv")"
+if [[ -z "$TF32_SUMMARY" ]]; then
+  echo "WARNING: No TF32 results parsed from $OUTDIR/tf32_tensorop.gemm.csv"
 fi
 
-log "DONE. CSV written to: $OUTFILE"
-if [[ -n "$PEAK_GFTS" ]]; then
-  log "Parsed performance metric: ${PEAK_GFTS}"
+# --- Print summary ---
+echo
+echo "== Summary (best entries) =="
+printf "%-8s %-12s %-12s %-s\n" "Mode" "GFLOP/s" "OpClass" "Kernel"
+IFS=',' read -r gflops kernel opclass math <<<"$FP32_SUMMARY"
+if [[ -n "${gflops:-}" ]]; then
+  printf "%-8s %-12s %-12s %-s\n" "FP32" "$gflops" "${opclass:-simt}" "${kernel:-N/A}"
+else
+  printf "%-8s %-12s %-12s %-s\n" "FP32" "N/A" "simt" "N/A"
+fi
+IFS=',' read -r gflops kernel opclass math <<<"$TF32_SUMMARY"
+if [[ -n "${gflops:-}" ]]; then
+  printf "%-8s %-12s %-12s %-s\n" "TF32" "$gflops" "${opclass:-tensorop}" "${kernel:-N/A}"
+else
+  printf "%-8s %-12s %-12s %-s\n" "TF32" "N/A" "tensorop" "N/A"
 fi
 
-# Machine-readable summary line (for chaining)
-echo "BENCHMARK:CUTLASS_PROFILER path=$PROFILER_PATH m=$M n=$N k=$K dtype=$DTYPE accum=$ACCUM iterations=$ITER csv=$OUTFILE metric=${PEAK_GFTS:-NA}"
+echo
