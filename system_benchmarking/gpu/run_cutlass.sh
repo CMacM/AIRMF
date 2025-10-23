@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # --- Config (overridable via env or CLI) ---
-PROFILER_BIN="${PROFILER_BIN:-./cutlass/build/tools/profiler/cutlass_profiler}"
+PROFILER_BIN="${PROFILER_BIN:-./cutlass/cutlass/build/tools/profiler/cutlass_profiler}"
 M="${1:-8192}"
 N="${2:-8192}"
 K="${3:-8192}"
@@ -55,7 +55,7 @@ parse_max_gflops () {
 # --- FP32 (SIMT) ---
 echo "[1/2] Running FP32 (SIMT) GEMM ..."
 "$PROFILER_BIN" \
-  --operation=Gemm \
+  --operation=conv2d \
   --op_class=simt \
   --A=f32:column --B=f32:column --C=f32:column --accum=f32 \
   --m="$M" --n="$N" --k="$K" \
@@ -71,7 +71,7 @@ fi
 # --- TF32 (Tensor Cores) ---
 echo "[2/2] Running TF32 (Tensor Core) GEMM ..."
 "$PROFILER_BIN" \
-  --operation=Gemm \
+  --operation=conv2d \
   --op_class=tensorop \
   --A=f32:column --B=f32:column --C=f32:column --accum=f32 \
   --kernels="$TF32_KERNEL_FILTER" \
@@ -83,9 +83,9 @@ echo "[2/2] Running TF32 (Tensor Core) GEMM ..."
 # Locate output file with regex
 
 
-TF32_SUMMARY="$(parse_max_gflops "$OUTDIR/tf32_tensorop.gemm.csv")"
+TF32_SUMMARY="$(parse_max_gflops "$OUTDIR/tf32_tensorop.convolution.csv")"
 if [[ -z "$TF32_SUMMARY" ]]; then
-  echo "WARNING: No TF32 results parsed from $OUTDIR/tf32_tensorop.gemm.csv"
+  echo "WARNING: No TF32 results parsed from $OUTDIR/tf32_tensorop.convolution.csv"
 fi
 
 # --- Print summary ---
