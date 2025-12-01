@@ -1,0 +1,10 @@
+name: airmf
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python
+  - pip
+  - pandas
+  - numpy
+  - matplotlib

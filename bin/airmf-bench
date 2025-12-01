@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AIRMF_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+usage() {
+  cat <<EOF
+Usage: airmf-bench <benchmark> [args...]
+
+Benchmarks:
+  cpu-peakflops    CPU peak FLOP/s benchmark using likwid-bench.
+  cpu-membw        CPU memory bandwidth benchmark using likwid-bench.
+  gpu-peakflops    GPU peak FLOP/s benchmark using cutlass.
+  gpu-membw        GPU memory bandwidth benchmark using nvbandwidth.
+  storage-bw       Storage / I/O benchmark using fio.
+
+Run 'airmf-bench <benchmark> --help' to see arguments for a specific benchmark.
+
+Examples:
+  airmf-bench cpu-membw dp triad avx512
+  airmf-bench cpu-peakflops sp fma avx
+  airmf-bench gpu-peakflops --op conv2d --op_type tensorcore --precision tf32
+  airmf-bench gpu-membw -t host_to_device_memcpy_ce (directly uses nvbandwidth as backend so can run with regular nvbandwidth args)
+  airmf-bench storage-bw --mode read --size 10G --bs 1M --jobs 4
+
+EOF
+}
+
+if [[ $# -lt 1 ]]; then
+  echo "airmf-bench: missing <benchmark>" >&2
+  usage
+  exit 2
+fi
+
+BENCH="$1"
+shift || true
+
+case "$BENCH" in
+  cpu-membw)
+    BACKEND="$AIRMF_ROOT/system_benchmarking/cpu_membw_likwidbench.sh"
+    ;;
+  cpu-peakflops)
+    BACKEND="$AIRMF_ROOT/system_benchmarking/cpu_peakflops_likwidbench.sh"
+    ;;
+  gpu-peakflops)
+    BACKEND="$AIRMF_ROOT/system_benchmarking/gpu_peakflops_cutlass.sh"
+    ;;
+  gpu-membw)
+    BACKEND="$AIRMF_ROOT/system_benchmarking/gpu_membw_nvbandwidth.sh"
+    ;;
+  storage-bw)
+    BACKEND="$AIRMF_ROOT/system_benchmarking/storage_fio.sh"
+    ;;
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  *)
+    echo "airmf-bench: unknown benchmark: $BENCH" >&2
+    usage
+    exit 2
+    ;;
+esac
+
+if [[ ! -x "$BACKEND" ]]; then
+  echo "airmf-bench: backend script not found or not executable:" >&2
+  echo "  $BACKEND" >&2
+  exit 1
+fi
+
+# Hand off completely; backend owns its argument parsing
+exec "$BACKEND" "$@"

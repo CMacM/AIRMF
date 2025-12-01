@@ -11,14 +11,19 @@ cd third_party
 TARBALL="likwid-${VERSION}.tar.gz"
 URL="http://ftp.fau.de/pub/likwid/${TARBALL}"
 
-echo "Downloading: ${URL}"
-wget -q --show-progress "${URL}"
+# Check if tarball already exists
+if [[ -f "${TARBALL}" ]]; then
+  echo "LIKWID tarball already exists: ${TARBALL}"
+else
+  echo "Downloading: ${URL}"
+  wget -q --show-progress "${URL}"
 
-echo "Extracting: ${TARBALL}"
-tar -xaf "${TARBALL}"
+  echo "Extracting: ${TARBALL}"
+  tar -xaf "${TARBALL}"
+fi
 
 # Detect extracted top-level directory
-TOPDIR="$(tar -tzf "${TARBALL}" | head -1 | cut -d/ -f1)"
+TOPDIR=$(find . -maxdepth 1 -type d -name "likwid-*" | head -n 1 | sed 's|^\./||')
 if [[ -z "${TOPDIR}" || ! -d "${TOPDIR}" ]]; then
   echo "Failed to detect LIKWID source directory." >&2
   exit 1

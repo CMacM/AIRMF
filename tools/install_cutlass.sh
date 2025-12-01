@@ -4,7 +4,7 @@ set -euo pipefail
 # CUDA/NVCC detection
 CUDACXX="${CUDACXX:-${CUDA_INSTALL_PATH:-/usr/local/cuda}/bin/nvcc}"
 
-# GPU arch detection (for CMAKE_CUDA_ARCHITECTURES)
+#GPU arch detection (for CMAKE_CUDA_ARCHITECTURES)
 GPU_INDEX="${GPU_INDEX:-0}"
 get_cc_short() {
   if command -v nvidia-smi >/dev/null 2>&1; then
@@ -21,6 +21,9 @@ get_cc_short() {
 }
 ARCH_OVERRIDE="${ARCH_OVERRIDE:-}"  # e.g. "80", "90", "100"
 ARCH="$( [[ -n "$ARCH_OVERRIDE" ]] && echo "$ARCH_OVERRIDE" || get_cc_short )"
+# Normalize possible NVCC-style inputs like "compute_80" or "sm_80".
+ARCH="${ARCH#compute_}"
+ARCH="${ARCH#sm_}"
 
 # Already available on PATH?
 if command -v cutlass_profiler >/dev/null 2>&1; then
@@ -29,13 +32,16 @@ if command -v cutlass_profiler >/dev/null 2>&1; then
 fi
 
 # Move to third_party/
-mkdir -p third_party/ && cd third_party/
+mkdir -p tools/third_party/ && cd tools/third_party/
 
 # Clone CUTLASS repo
 if [[ ! -d cutlass/.git ]]; then
   echo "Cloning CUTLASS repository..."
   git clone https://github.com/NVIDIA/cutlass.git
 fi
+
+# Clean any previous build
+rm -rf build
 
 cd cutlass
 mkdir -p build
@@ -44,7 +50,7 @@ cd build
 # Compile CUTLASS
 echo "Building CUTLASS..."
 cmake .. \
-  -DCUTLASS_NVCC_ARCHS="${ARCH}a" \
+  -DCUTLASS_NVCC_ARCHS="${ARCH}" \
   -DCUTLASS_ENABLE_TESTS=OFF \
   -DCUTLASS_UNITY_BUILD_ENABLED=ON \
   -DCUTLASS_LIBRARY_OPERATIONS='conv2d;GEMM' \
@@ -59,6 +65,7 @@ if [[ -f "$CUTLASS_PROFILER" ]]; then
   export PATH="$(dirname "$CUTLASS_PROFILER"):$PATH"
   echo "CUTLASS profiler installed at: $CUTLASS_PROFILER"
   echo "You may want to add it to your PATH permanently."
+else
+  echo "CUTLASS profiler build failed; not found at: $CUTLASS_PROFILER" >&2
+  exit 1
 fi
-
-
