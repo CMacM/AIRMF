@@ -17,8 +17,8 @@ fi
 echo "Using NVCC at: $CUDACXX"
 
 # Clone nvbandwidth repo
-mkdir -p third_party
-cd third_party
+mkdir -p tools/third_party
+cd tools/third_party
 if [[ ! -d nvbandwidth/.git ]]; then
   echo "Cloning nvbandwidth repository..."
   git clone https://github.com/NVIDIA/nvbandwidth.git

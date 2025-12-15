@@ -13,7 +13,7 @@ Benchmarks:
   cpu-membw        CPU memory bandwidth benchmark using likwid-bench.
   gpu-peakflops    GPU peak FLOP/s benchmark using cutlass.
   gpu-membw        GPU memory bandwidth benchmark using nvbandwidth.
-  storage-bw       Storage / I/O benchmark using fio.
+  storage-bw       Storage benchmark using fio OR ior.
 
 Run 'airmf-bench <benchmark> --help' to see arguments for a specific benchmark.
 

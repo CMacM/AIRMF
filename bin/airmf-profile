@@ -12,7 +12,7 @@ Usage: airmf-profile <mode> [args...]
 Modes:
   cpu         CPU workflow profiling.
   gpu         GPU workflow profiling.
-  storage     Storage / I/O workflow profiling.
+  storage     Storage workflow profiling.
 
 All arguments after the mode are passed directly to the selected backend.
 Run 'airmf-profile <mode> --help' for backend-specific options.

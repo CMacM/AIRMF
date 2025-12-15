@@ -5,8 +5,8 @@ set -euo pipefail
 # Defaults
 VERSION="${VERSION:-stable}"
 
-mkdir -p third_party
-cd third_party
+mkdir -p tools/third_party
+cd tools/third_party
 
 TARBALL="likwid-${VERSION}.tar.gz"
 URL="http://ftp.fau.de/pub/likwid/${TARBALL}"
